@@ -56,7 +56,6 @@ void dijkstras(vector<vector<pair<int, long long> > > & graph, int source, vecto
 
 int main(int argc, char * argv[]){
     string buf;
-    size_t len = 0;
     int nnodes = 0, nedges = 0;
     ifstream grfile, ssfile;
     ofstream outfile;
