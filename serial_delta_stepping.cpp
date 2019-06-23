@@ -6,10 +6,12 @@
  *  Author: fengyanlin@pku.edu.cn                                    *
  *********************************************************************
  */
+#include <unordered_set>
 #include <vector>
 #include <queue>
 #include <limits>
 #include <iostream>
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -17,8 +19,9 @@
 #include <stdio.h>
 using namespace std;
 
+
 // #define DEBUG
-#define CHECK_DISCONNECTED
+// #define CHECK_DISCONNECTED
 
 
 /*
@@ -35,25 +38,24 @@ void delta_stepping(vector<vector<pair<int, long long> > > & graph, vector<int> 
     fill(dist.begin(), dist.end(), numeric_limits<long long>::max());
 
     int nbuckets = max_dist / delta + 1;
-    vector<vector<int> > B(nbuckets);
+    vector<unordered_set<int> > B(nbuckets);
 
     dist[source] = 0;
-    B[0].push_back(source);
+    B[0].insert(source);
     for (int bid = 0; bid < nbuckets; bid++){
-        vector<int> S;
+        unordered_set<int> S;
         vector<pair<int, long long> > R;
-        while (B[bid].size() > 0){
+        while (!B[bid].empty()){
             for (int v: B[bid]){
                 long long dv = dist[v];
                 int max_j = bid == nbuckets - 1 ? graph[v].size() : nlight[v];
                 for (int j = 0; j < max_j; j++){
                     int tv = graph[v][j].first;
                     long long w = graph[v][j].second;
-
                     R.push_back({tv, w + dv});
                 }
             }
-            S.insert(S.end(), B[bid].begin(), B[bid].end());
+            S.insert(B[bid].begin(), B[bid].end());
             B[bid].clear();
 
             for (pair<int, long long> edge : R){
@@ -65,7 +67,7 @@ void delta_stepping(vector<vector<pair<int, long long> > > & graph, vector<int> 
                     int dest = dv / delta;
                     if (dest >= nbuckets)
                         dest = nbuckets - 1;
-                    B[dest].push_back(v);
+                    B[dest].insert(v);
                 }
             }
             R.clear();
@@ -84,11 +86,12 @@ void delta_stepping(vector<vector<pair<int, long long> > > & graph, vector<int> 
             int v = edge.first;
             long long dv = edge.second;
             if (dv < dist[v]){
+                int from = min(dist[v] / delta, (long long)nbuckets - 1);
+                int to = min(dv / delta, (long long)nbuckets - 1);
+                if (B[from].find(v) != B[from].end())
+                    B[from].erase(v);
+                B[to].insert(v);
                 dist[v] = dv;
-                int dest = dv / delta;
-                if (dest >= nbuckets)
-                    dest = nbuckets - 1;
-                B[dest].push_back(v);
             }
         }
     }
@@ -174,6 +177,7 @@ int main(int argc, char * argv[]){
 #endif
             }
             outfile << "d " << checksum << endl;
+            break;
         }
     }
     ssfile.close();
