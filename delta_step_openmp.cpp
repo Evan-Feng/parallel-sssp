@@ -18,12 +18,15 @@
 #include <string>
 #include <stdlib.h>
 #include <stdio.h>
+#include <time.h>
 using namespace std;
 
-
+#define HELLO { if (pid == 0) cout << "hello" << endl; }
 #define DEBUG
 // #define SERIAL
 // #define CHECK_DISCONNECTED
+
+#define NTASK = 400
 
 
 /*
@@ -38,10 +41,9 @@ using namespace std;
 long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, vector<int> & nlight, int source,
                            vector<long long> & dist, long long delta, long long max_dist,
                            int nprocs, vector<unordered_set<int> > & B, vector<map<int, long long> > & R,
-                           vector<unordered_set<int> > & S, omp_lock_t * B_lock, omp_lock_t * R_lock){
+                           vector<unordered_set<int> > & S){
     int nbuckets = max_dist / delta + 1;
     int nnodes = graph.size();
-    int curr_bucket_empty[nprocs];
     int next_bid[nprocs];
     int curr_bucket_empty_flag = 0;
     long long checksum = 0;
@@ -50,7 +52,8 @@ long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, 
     fill(dist.begin(), dist.end(), numeric_limits<long long>::max());
 
 #ifdef DEBUG
-    cout << "running " << nprocs << " threads in parallel" << endl;
+    cout << "running delta-stepping with [delta = " << delta << "] [max_dist = "
+         << max_dist << "] [num_threads = " << nprocs << "]" << endl;
 #endif
 
     dist[source] = 0;
@@ -65,7 +68,6 @@ long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, 
         next_bid[pid] = bid + 1;
         while (next_bid[pid] < nbuckets && B[next_bid[pid] * nprocs + pid].empty())
             next_bid[pid]++;
-#pragma omp barrier
         if (pid == 0){
             curr_bucket_empty_flag = 0;
             bid = nbuckets;
@@ -87,21 +89,76 @@ long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, 
                     long long w = graph[v][j].second;
                     long long dtv = dv + w;
 
-                    omp_set_lock(&R_lock[tv % nprocs]);
-                    auto it = R[tv % nprocs].find(tv);
-                    if (it == R[tv % nprocs].end())
-                        R[tv % nprocs][tv] = dtv;
+                    int r_dest = (pid * nprocs) + (tv % nprocs);
+                    auto it = R[r_dest].find(tv);
+                    if (it == R[r_dest].end())
+                        R[r_dest][tv] = dtv;
                     else if (dtv < it->second)
                         it->second = dtv;
-                    omp_unset_lock(&R_lock[tv % nprocs]);
                 }
             }
             S[pid].insert(B[bid * nprocs + pid].begin(), B[bid * nprocs + pid].end());
             B[bid * nprocs + pid].clear();
 
 #pragma omp barrier
+            // merge light requests
+            // for (int i = 1; i < nprocs; i++){
+            //     int to_merge = i * nprocs + pid;
+            //     R[pid].insert(R[to_merge].begin(), R[to_merge].end());
+            //     R[to_merge].clear();
+            // }
 
-            for (pair<int, long long> edge : R[pid]){
+            for (int i = 0; i < nprocs; i++){
+                for (pair<int, long long> edge : R[i * nprocs + pid]){
+                    int v = edge.first;
+                    long long dv = edge.second;
+                    if (dv < dist[v]){
+                        int from = min(dist[v] / delta, (long long)nbuckets - 1);
+                        int to = min(dv / delta, (long long)nbuckets - 1);
+                        from = from * nprocs + pid;  // pid == v % nprocs
+                        to = to * nprocs + pid;
+                        if (B[from].find(v) == B[from].end())
+                            B[to].insert(v);
+                        else if (from != to){
+                            B[from].erase(v);
+                            B[to].insert(v);
+                        }
+                        dist[v] = dv;
+                    }
+                }
+                R[i * nprocs + pid].clear();
+            }
+
+            if (pid == 0)
+                curr_bucket_empty_flag = 1;
+#pragma omp barrier
+#pragma omp for reduction(min:curr_bucket_empty_flag)
+            for (int i = 0; i < nprocs; i++)
+                if (B[bid * nprocs + i].empty() < curr_bucket_empty_flag)
+                    curr_bucket_empty_flag = B[bid * nprocs + i].empty();
+        }
+
+        // R[pid].clear();
+#pragma omp barrier
+        for (int v: S[pid]){
+            long long dv = dist[v];
+            for (int j = nlight[v]; j < graph[v].size(); j++){
+                int tv = graph[v][j].first;
+                long long w = graph[v][j].second;
+                long long dtv = w + dv;
+
+                int r_dest = (pid * nprocs) + (tv % nprocs);
+                auto it = R[r_dest].find(tv);
+                if (it == R[r_dest].end())
+                    R[r_dest][tv] = dtv;
+                else if (dtv < it->second)
+                    it->second = dtv;
+            }
+        }
+        S[pid].clear();
+#pragma omp barrier
+        for (int i = 0; i < nprocs; i++){
+            for (pair<int, long long> edge : R[i * nprocs + pid]){
                 int v = edge.first;
                 long long dv = edge.second;
                 if (dv < dist[v]){
@@ -118,55 +175,8 @@ long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, 
                     dist[v] = dv;
                 }
             }
-            R[pid].clear();
-
-            if (pid == 0)
-                curr_bucket_empty_flag = 1;
-#pragma omp barrier
-            curr_bucket_empty[pid] = B[bid * nprocs + pid].empty();
-#pragma omp for reduction(min:curr_bucket_empty_flag)
-            for (int i = 0; i < nprocs; i++)
-                if (curr_bucket_empty[i] < curr_bucket_empty_flag)
-                    curr_bucket_empty_flag = curr_bucket_empty[i];
+            R[i * nprocs + pid].clear();
         }
-        R[pid].clear();
-#pragma omp barrier
-        for (int v: S[pid]){
-            long long dv = dist[v];
-            for (int j = nlight[v]; j < graph[v].size(); j++){
-                int tv = graph[v][j].first;
-                long long w = graph[v][j].second;
-                long long dtv = w + dv;
-
-                omp_set_lock(&R_lock[tv % nprocs]);
-                auto it = R[tv % nprocs].find(tv);
-                if (it == R[tv % nprocs].end())
-                    R[tv % nprocs][tv] = dtv;
-                else if (dtv < it->second)
-                    it->second = dtv;
-                omp_unset_lock(&R_lock[tv % nprocs]);
-            }
-        }
-        S[pid].clear();
-#pragma omp barrier
-        for (pair<int, long long> edge : R[pid]){
-            int v = edge.first;
-            long long dv = edge.second;
-            if (dv < dist[v]){
-                int from = min(dist[v] / delta, (long long)nbuckets - 1);
-                int to = min(dv / delta, (long long)nbuckets - 1);
-                from = from * nprocs + pid;  // pid == v % nprocs
-                to = to * nprocs + pid;
-                if (B[from].find(v) == B[from].end())
-                    B[to].insert(v);
-                else if (from != to){
-                    B[from].erase(v);
-                    B[to].insert(v);
-                }
-                dist[v] = dv;
-            }
-        }
-        R[pid].clear();
 #pragma omp barrier
     }
 #pragma omp for reduction(+:checksum)
@@ -193,8 +203,8 @@ int main(int argc, char * argv[]){
     int src, trg;
     long long weight;
 
-    long long delta = 8000;
-    long long max_dist = 4000000;
+    long long delta = 20000;
+    long long max_dist = 400000000;
 
     // disable sync with stdio
     ios_base::sync_with_stdio(false);
@@ -211,19 +221,10 @@ int main(int argc, char * argv[]){
 #endif
     omp_set_num_threads(nprocs);
     int nbuckets = (max_dist / delta) + 1;
-    omp_lock_t B_lock[nbuckets * nprocs];
-    omp_lock_t R_lock[nprocs];
     vector<unordered_set<int> > B(nbuckets * nprocs);
-    vector<map<int, long long> > R(nprocs);
+    vector<map<int, long long> > R(nprocs * nprocs);
     vector<unordered_set<int> > S(nprocs);
 
-#pragma omp parallel
-{
-    int pid = omp_get_thread_num();
-    for (int bid = 0; bid < nbuckets; bid++)
-        omp_init_lock(&B_lock[bid * nprocs + pid]);
-    omp_init_lock(&R_lock[pid]);
-}
 
     // read graph file
     grfile.open(argv[1]);
@@ -261,6 +262,16 @@ int main(int argc, char * argv[]){
     }
     grfile.close();
 
+    if (nnodes < 1e6){
+        max_dist = 1e7;
+    }
+    else if (nnodes < 1e7){
+        max_dist = 4e7;
+    }
+    else {
+        max_dist = 4e8;
+    }
+
     // read the .ss file line by line and solve the corresponding sssp problem
     ssfile.open(argv[2]);
     outfile.open(argv[3], fstream::app);
@@ -270,7 +281,10 @@ int main(int argc, char * argv[]){
             long long checksum = 0;
             istringstream stream(buf);
             stream >> op >> src;
-            checksum = delta_stepping_openmp(graph, nlight, src - 1, dist, delta, max_dist, nprocs, B, R, S, B_lock, R_lock);
+            clock_t begin = clock();
+            checksum = delta_stepping_openmp(graph, nlight, src - 1, dist, delta, max_dist, nprocs, B, R, S);
+            clock_t end = clock();
+            cout << "delta-stepping takes " << (double)(end - begin) / (CLOCKS_PER_SEC * nprocs) << " seconds" << endl;
             outfile << "d " << checksum << endl;
         }
     }
