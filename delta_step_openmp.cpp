@@ -24,9 +24,9 @@ using namespace std;
 #define HELLO { if (pid == 0) cout << "hello" << endl; }
 #define DEBUG
 // #define SERIAL
-// #define CHECK_DISCONNECTED
+#define CHECK_DISCONNECTED
 
-#define NTASK = 400
+#define NTASK 400
 
 
 /*
@@ -53,7 +53,17 @@ long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, 
 
 #ifdef DEBUG
     cout << "running delta-stepping with [delta = " << delta << "] [max_dist = "
-         << max_dist << "] [num_threads = " << nprocs << "]" << endl;
+         << max_dist << "] [num_threads = " << nprocs << "] [src = " << source << "]" << endl;
+#endif
+
+#ifdef DEBUG
+#pragma omp parallel
+{
+    int pid = omp_get_thread_num();
+    for (int bi = 0; bi < nbuckets; bi++)
+        if (!B[bi * nprocs + pid].empty())
+            cout << "bucket not empty" << endl;
+}
 #endif
 
     dist[source] = 0;
@@ -68,6 +78,7 @@ long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, 
         next_bid[pid] = bid + 1;
         while (next_bid[pid] < nbuckets && B[next_bid[pid] * nprocs + pid].empty())
             next_bid[pid]++;
+#pragma omp barrier
         if (pid == 0){
             curr_bucket_empty_flag = 0;
             bid = nbuckets;
@@ -88,6 +99,10 @@ long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, 
                     int tv = graph[v][j].first;
                     long long w = graph[v][j].second;
                     long long dtv = dv + w;
+#ifdef DEBUG
+                    if (w < 0)
+                        cout << "negative weight encountered" << endl;
+#endif
 
                     int r_dest = (pid * nprocs) + (tv % nprocs);
                     auto it = R[r_dest].find(tv);
@@ -115,6 +130,10 @@ long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, 
                     if (dv < dist[v]){
                         int from = min(dist[v] / delta, (long long)nbuckets - 1);
                         int to = min(dv / delta, (long long)nbuckets - 1);
+#ifdef DEBUG
+                        if (to < bid)
+                            cout << "[A] inserting into lower buckets" << endl;
+#endif
                         from = from * nprocs + pid;  // pid == v % nprocs
                         to = to * nprocs + pid;
                         if (B[from].find(v) == B[from].end())
@@ -164,6 +183,10 @@ long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, 
                 if (dv < dist[v]){
                     int from = min(dist[v] / delta, (long long)nbuckets - 1);
                     int to = min(dv / delta, (long long)nbuckets - 1);
+#ifdef DEBUG
+                    if (to <= bid)
+                        cout << "[B] inserting into lower buckets" << endl;
+#endif
                     from = from * nprocs + pid;  // pid == v % nprocs
                     to = to * nprocs + pid;
                     if (B[from].find(v) == B[from].end())
@@ -182,10 +205,8 @@ long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, 
 #pragma omp for reduction(+:checksum)
     for (int v = 0; v < nnodes; v++)
 #ifdef CHECK_DISCONNECTED
-        if (n < numeric_limits<long long>::max())
-            checksum += n;
-        else
-            cout << "inf dist encountered" << endl;
+        if (dist[v] < numeric_limits<long long>::max())
+            checksum += dist[v];
 #else
         checksum += dist[v];
 #endif
