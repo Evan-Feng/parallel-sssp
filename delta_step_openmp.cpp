@@ -23,7 +23,7 @@ using namespace std;
 
 #define DEBUG
 // #define SERIAL
-#define CHECK_DISCONNECTED
+// #define CHECK_DISCONNECTED
 
 
 /*
@@ -32,10 +32,10 @@ using namespace std;
  *  graph: the graph represented by a list of vertices
  *  source: ID of the source point
  *  
- *  returns: the distances between each vectex and the source point 
+ *  returns: the sum of all the distances
  */
 
-void delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, vector<int> & nlight, int source, 
+long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, vector<int> & nlight, int source,
                            vector<long long> & dist, long long delta, long long max_dist,
                            int nprocs, vector<unordered_set<int> > & B, vector<map<int, long long> > & R,
                            vector<unordered_set<int> > & S, omp_lock_t * B_lock, omp_lock_t * R_lock){
@@ -44,6 +44,8 @@ void delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, vecto
     int curr_bucket_empty[nprocs];
     int next_bid[nprocs];
     int curr_bucket_empty_flag = 0;
+    long long checksum = 0;
+    long long local_checksum[nprocs];
 
     fill(dist.begin(), dist.end(), numeric_limits<long long>::max());
 
@@ -167,7 +169,18 @@ void delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, vecto
         R[pid].clear();
 #pragma omp barrier
     }
+#pragma omp for reduction(+:checksum)
+    for (int v = 0; v < nnodes; v++)
+#ifdef CHECK_DISCONNECTED
+        if (n < numeric_limits<long long>::max())
+            checksum += n;
+        else
+            cout << "inf dist encountered" << endl;
+#else
+        checksum += dist[v];
+#endif
 }
+    return checksum;
 }
 
 
@@ -257,18 +270,7 @@ int main(int argc, char * argv[]){
             long long checksum = 0;
             istringstream stream(buf);
             stream >> op >> src;
-            delta_stepping_openmp(graph, nlight, src - 1, dist, delta, max_dist, nprocs, B, R, S, B_lock, R_lock);
-            for (long long n: dist){
-               
-#ifdef CHECK_DISCONNECTED
-                if (n < numeric_limits<long long>::max())
-                    checksum += n;
-                else
-                    cout << "inf dist encountered" << endl;
-#else
-                checksum += n;
-#endif
-            }
+            checksum = delta_stepping_openmp(graph, nlight, src - 1, dist, delta, max_dist, nprocs, B, R, S, B_lock, R_lock);
             outfile << "d " << checksum << endl;
         }
     }
