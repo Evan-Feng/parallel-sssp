@@ -21,7 +21,7 @@
 using namespace std;
 
 
-// #define DEBUG
+#define DEBUG
 // #define SERIAL
 #define CHECK_DISCONNECTED
 
@@ -36,26 +36,16 @@ using namespace std;
  */
 
 void delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, vector<int> & nlight, int source, 
-                    vector<long long> & dist, long long delta, long long max_dist){
-    int nprocs = omp_get_num_procs();
-#ifdef SERIAL
-    nprocs = 1;
-#endif
-    omp_set_num_threads(nprocs);
-    fill(dist.begin(), dist.end(), numeric_limits<long long>::max());
-
+                           vector<long long> & dist, long long delta, long long max_dist,
+                           int nprocs, vector<unordered_set<int> > & B, vector<map<int, long long> > & R,
+                           vector<unordered_set<int> > & S, omp_lock_t * B_lock, omp_lock_t * R_lock){
     int nbuckets = max_dist / delta + 1;
-    vector<unordered_set<int> > B(nbuckets * nprocs);
     int nnodes = graph.size();
     int curr_bucket_empty[nprocs];
     int next_bid[nprocs];
     int curr_bucket_empty_flag = 0;
 
-    omp_lock_t B_lock[nbuckets * nprocs];
-    omp_lock_t R_lock[nprocs];
-    omp_lock_t F_lock;
-
-    omp_init_lock(&F_lock);
+    fill(dist.begin(), dist.end(), numeric_limits<long long>::max());
 
 #ifdef DEBUG
     cout << "running " << nprocs << " threads in parallel" << endl;
@@ -63,18 +53,11 @@ void delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, vecto
 
     dist[source] = 0;
     B[source % nprocs].insert(source);
-    vector<map<int, long long> > R(nprocs);
-    vector<unordered_set<int> > S(nprocs);
     int bid = -1;
 
 #pragma omp parallel
 {
     int pid = omp_get_thread_num();
-
-    // init locks
-    for (int bid = 0; bid < nbuckets; bid++)
-        omp_init_lock(&B_lock[bid * nprocs + pid]);
-    omp_init_lock(&R_lock[pid]);
 
     while (1){
         next_bid[pid] = bid + 1;
@@ -197,9 +180,8 @@ int main(int argc, char * argv[]){
     int src, trg;
     long long weight;
 
-    long long delta = 1000;
-    long long max_dist = 1000000;
-
+    long long delta = 8000;
+    long long max_dist = 4000000;
 
     // disable sync with stdio
     ios_base::sync_with_stdio(false);
@@ -208,6 +190,27 @@ int main(int argc, char * argv[]){
         printf("Usage: ./%s <graph file> <aux file> <output file>\n", argv[0]);
         exit(0);
     }
+
+    // initialize data structures
+    int nprocs = omp_get_num_procs();
+#ifdef SERIAL
+    nprocs = 1;
+#endif
+    omp_set_num_threads(nprocs);
+    int nbuckets = (max_dist / delta) + 1;
+    omp_lock_t B_lock[nbuckets * nprocs];
+    omp_lock_t R_lock[nprocs];
+    vector<unordered_set<int> > B(nbuckets * nprocs);
+    vector<map<int, long long> > R(nprocs);
+    vector<unordered_set<int> > S(nprocs);
+
+#pragma omp parallel
+{
+    int pid = omp_get_thread_num();
+    for (int bid = 0; bid < nbuckets; bid++)
+        omp_init_lock(&B_lock[bid * nprocs + pid]);
+    omp_init_lock(&R_lock[pid]);
+}
 
     // read graph file
     grfile.open(argv[1]);
@@ -254,7 +257,7 @@ int main(int argc, char * argv[]){
             long long checksum = 0;
             istringstream stream(buf);
             stream >> op >> src;
-            delta_stepping_openmp(graph, nlight, src - 1, dist, delta, max_dist);
+            delta_stepping_openmp(graph, nlight, src - 1, dist, delta, max_dist, nprocs, B, R, S, B_lock, R_lock);
             for (long long n: dist){
                
 #ifdef CHECK_DISCONNECTED
