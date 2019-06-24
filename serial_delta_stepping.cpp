@@ -88,9 +88,12 @@ void delta_stepping(vector<vector<pair<int, long long> > > & graph, vector<int> 
             if (dv < dist[v]){
                 int from = min(dist[v] / delta, (long long)nbuckets - 1);
                 int to = min(dv / delta, (long long)nbuckets - 1);
-                if (B[from].find(v) != B[from].end())
+                if (B[from].find(v) == B[from].end())
+                    B[to].insert(v);
+                else if (from != to){
                     B[from].erase(v);
-                B[to].insert(v);
+                    B[to].insert(v);
+                }
                 dist[v] = dv;
             }
         }
@@ -107,8 +110,8 @@ int main(int argc, char * argv[]){
     int src, trg;
     long long weight;
 
-    long long delta = 1000;
-    long long max_dist = 1000000;
+    long long delta = 8000;
+    long long max_dist = 4000000;
 
 
     // disable sync with stdio
@@ -177,7 +180,6 @@ int main(int argc, char * argv[]){
 #endif
             }
             outfile << "d " << checksum << endl;
-            break;
         }
     }
     ssfile.close();
