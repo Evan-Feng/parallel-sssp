@@ -235,16 +235,12 @@ int main(int argc, char * argv[]){
         exit(0);
     }
 
-    // initialize data structures
+    // set number of threads
     int nprocs = omp_get_num_procs();
 #ifdef SERIAL
     nprocs = 1;
 #endif
     omp_set_num_threads(nprocs);
-    int nbuckets = (max_dist / delta) + 1;
-    vector<unordered_set<int> > B(nbuckets * nprocs);
-    vector<map<int, long long> > R(nprocs * nprocs);
-    vector<unordered_set<int> > S(nprocs);
 
 
     // read graph file
@@ -283,15 +279,23 @@ int main(int argc, char * argv[]){
     }
     grfile.close();
 
+    // initialize data structures
     if (nnodes < 1e6){
+        delta = 20000;
         max_dist = 1e7;
     }
     else if (nnodes < 1e7){
+        delta = 20000;
         max_dist = 4e7;
     }
     else {
+        delta = 20000;
         max_dist = 4e8;
     }
+    int nbuckets = (max_dist / delta) + 1;
+    vector<unordered_set<int> > B(nbuckets * nprocs);
+    vector<map<int, long long> > R(nprocs * nprocs);
+    vector<unordered_set<int> > S(nprocs);
 
     // read the .ss file line by line and solve the corresponding sssp problem
     ssfile.open(argv[2]);
