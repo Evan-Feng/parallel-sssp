@@ -26,8 +26,8 @@ using namespace std;
 // #define SERIAL
 #define CHECK_DISCONNECTED
 
-#define NTASK 400
-
+#define NTASK 80
+#define SCHEDULE schedule(static, 2)
 
 /*
  *  delta_stepping_openmp - solve the single source shotest path problem using the delta stepping algorithm
@@ -44,10 +44,9 @@ long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, 
                            vector<unordered_set<int> > & S){
     int nbuckets = max_dist / delta + 1;
     int nnodes = graph.size();
-    int next_bid[nprocs];
+    int next_bid[NTASK];
     int curr_bucket_empty_flag = 0;
     long long checksum = 0;
-    long long local_checksum[nprocs];
 
     fill(dist.begin(), dist.end(), numeric_limits<long long>::max());
 
@@ -57,54 +56,126 @@ long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, 
 #endif
 
 #ifdef DEBUG
-#pragma omp parallel
-{
-    int pid = omp_get_thread_num();
-    for (int bi = 0; bi < nbuckets; bi++)
-        if (!B[bi * nprocs + pid].empty())
-            cout << "bucket not empty" << endl;
-}
+    int exit_flag = 0;
+#pragma omp parallel for
+    for (int tid = 0; tid < NTASK; tid++)
+        for (int bi = 0; bi < nbuckets; bi++)
+            if (!B[bi * NTASK + tid].empty()){
+                exit_flag = 1;
+            }
+    if (exit_flag){
+        cout << "bucket not empty" << endl;
+        exit(0);
+    }
 #endif
 
     dist[source] = 0;
-    B[source % nprocs].insert(source);
+    B[source % NTASK].insert(source);
     int bid = -1;
+    int nbid = -1;
 
 #pragma omp parallel
 {
-    int pid = omp_get_thread_num();
-
     while (1){
-        next_bid[pid] = bid + 1;
-        while (next_bid[pid] < nbuckets && B[next_bid[pid] * nprocs + pid].empty())
-            next_bid[pid]++;
-#pragma omp barrier
-        if (pid == 0){
-            curr_bucket_empty_flag = 0;
-            bid = nbuckets;
+#pragma omp single
+{
+        curr_bucket_empty_flag = 0;
+        nbid = nbuckets;
+}
+#pragma omp for reduction(min:nbid) SCHEDULE
+        for (int tid = 0; tid < NTASK; tid++){
+            int next_bid = bid + 1;
+            while (next_bid < nbuckets && B[next_bid * NTASK + tid].empty())
+                next_bid++;
+            if (next_bid < nbid)
+                nbid = next_bid;
         }
-#pragma omp barrier
-#pragma omp for reduction(min:bid)
-        for (int i = 0; i < nprocs; i++)
-            if (next_bid[i] < bid)
-                bid = next_bid[i];
+#pragma omp single
+        bid = nbid;
         if (bid >= nbuckets)
             break;
 
         while (!curr_bucket_empty_flag){
-            for (auto v: B[bid * nprocs + pid]){
-                long long dv = dist[v];
-                int max_j = bid == nbuckets - 1 ? graph[v].size() : nlight[v];
-                for (int j = 0; j < max_j; j++){
-                    int tv = graph[v][j].first;
-                    long long w = graph[v][j].second;
-                    long long dtv = dv + w;
+#pragma omp for SCHEDULE
+            for (int tid = 0; tid < NTASK; tid++){
+                for (auto v: B[bid * NTASK + tid]){
+                    long long dv = dist[v];
+                    int max_j = bid == nbuckets - 1 ? graph[v].size() : nlight[v];
+                    for (int j = 0; j < max_j; j++){
+                        int tv = graph[v][j].first;
+                        long long w = graph[v][j].second;
+                        long long dtv = dv + w;
 #ifdef DEBUG
-                    if (w < 0)
-                        cout << "negative weight encountered" << endl;
+                        if (w < 0)
+                            cout << "negative weight encountered" << endl;
 #endif
 
-                    int r_dest = (pid * nprocs) + (tv % nprocs);
+                        int r_dest = (tid * NTASK) + (tv % NTASK);
+                        auto it = R[r_dest].find(tv);
+                        if (it == R[r_dest].end())
+                            R[r_dest][tv] = dtv;
+                        else if (dtv < it->second)
+                            it->second = dtv;
+                    }
+                }
+                if (bid != nbuckets - 1)
+                    S[tid].insert(B[bid * NTASK + tid].begin(), B[bid * NTASK + tid].end());
+                B[bid * NTASK + tid].clear();
+            }
+            // merge light requests
+            // for (int i = 1; i < nprocs; i++){
+            //     int to_merge = i * nprocs + pid;
+            //     R[pid].insert(R[to_merge].begin(), R[to_merge].end());
+            //     R[to_merge].clear();
+            // }
+#pragma omp for SCHEDULE
+            for (int tid = 0; tid < NTASK; tid++){ 
+                for (int i = 0; i < NTASK; i++){
+                    for (pair<int, long long> edge : R[i * NTASK + tid]){
+                        int v = edge.first;
+                        long long dv = edge.second;
+                        if (dv < dist[v]){
+                            int from = min(dist[v] / delta, (long long)nbuckets - 1);
+                            int to = min(dv / delta, (long long)nbuckets - 1);
+#ifdef DEBUG
+                            if (to < bid) ;
+                                // cout << "[A] inserting into lower buckets" << endl;
+#endif
+                            from = from * NTASK + tid;  // tid == v % NTASK
+                            to = to * NTASK + tid;
+                            if (B[from].find(v) == B[from].end())
+                                B[to].insert(v);
+                            else if (from != to){
+                                B[from].erase(v);
+                                B[to].insert(v);
+                            }
+                            dist[v] = dv;
+                        }
+                    }
+                    R[i * NTASK + tid].clear();
+                }
+            }
+
+#pragma omp single
+            curr_bucket_empty_flag = 1;
+#pragma omp for reduction(min:curr_bucket_empty_flag) SCHEDULE
+            for (int tid = 0; tid < NTASK; tid++)
+                if (B[bid * NTASK + tid].empty() < curr_bucket_empty_flag)
+                    curr_bucket_empty_flag = B[bid * NTASK + tid].empty();
+        }
+        // R[pid].clear();
+        if (bid == nbuckets - 1)
+            break;
+#pragma omp for SCHEDULE
+        for (int tid = 0; tid < NTASK; tid++){
+            for (int v: S[tid]){
+                long long dv = dist[v];
+                for (int j = nlight[v]; j < graph[v].size(); j++){
+                    int tv = graph[v][j].first;
+                    long long w = graph[v][j].second;
+                    long long dtv = w + dv;
+
+                    int r_dest = (tid * NTASK) + (tv % NTASK);
                     auto it = R[r_dest].find(tv);
                     if (it == R[r_dest].end())
                         R[r_dest][tv] = dtv;
@@ -112,30 +183,22 @@ long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, 
                         it->second = dtv;
                 }
             }
-            S[pid].insert(B[bid * nprocs + pid].begin(), B[bid * nprocs + pid].end());
-            B[bid * nprocs + pid].clear();
-
-#pragma omp barrier
-            // merge light requests
-            // for (int i = 1; i < nprocs; i++){
-            //     int to_merge = i * nprocs + pid;
-            //     R[pid].insert(R[to_merge].begin(), R[to_merge].end());
-            //     R[to_merge].clear();
-            // }
-
-            for (int i = 0; i < nprocs; i++){
-                for (pair<int, long long> edge : R[i * nprocs + pid]){
+            S[tid].clear();
+        }
+#pragma omp for SCHEDULE
+        for (int tid = 0; tid < NTASK; tid++){
+            for (int i = 0; i < NTASK; i++){
+                for (pair<int, long long> edge : R[i * NTASK + tid]){
                     int v = edge.first;
                     long long dv = edge.second;
                     if (dv < dist[v]){
                         int from = min(dist[v] / delta, (long long)nbuckets - 1);
                         int to = min(dv / delta, (long long)nbuckets - 1);
 #ifdef DEBUG
-                        if (to < bid)
-                            cout << "[A] inserting into lower buckets" << endl;
+                        if (to <= bid)
+                            cout << "[B] inserting into lower buckets " << bid << endl;
 #endif
-                        from = from * nprocs + pid;  // pid == v % nprocs
-                        to = to * nprocs + pid;
+                        to = to * NTASK + tid;
                         if (B[from].find(v) == B[from].end())
                             B[to].insert(v);
                         else if (from != to){
@@ -145,64 +208,11 @@ long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, 
                         dist[v] = dv;
                     }
                 }
-                R[i * nprocs + pid].clear();
-            }
-
-            if (pid == 0)
-                curr_bucket_empty_flag = 1;
-#pragma omp barrier
-#pragma omp for reduction(min:curr_bucket_empty_flag)
-            for (int i = 0; i < nprocs; i++)
-                if (B[bid * nprocs + i].empty() < curr_bucket_empty_flag)
-                    curr_bucket_empty_flag = B[bid * nprocs + i].empty();
-        }
-
-        // R[pid].clear();
-#pragma omp barrier
-        for (int v: S[pid]){
-            long long dv = dist[v];
-            for (int j = nlight[v]; j < graph[v].size(); j++){
-                int tv = graph[v][j].first;
-                long long w = graph[v][j].second;
-                long long dtv = w + dv;
-
-                int r_dest = (pid * nprocs) + (tv % nprocs);
-                auto it = R[r_dest].find(tv);
-                if (it == R[r_dest].end())
-                    R[r_dest][tv] = dtv;
-                else if (dtv < it->second)
-                    it->second = dtv;
+                R[i * NTASK + tid].clear();
             }
         }
-        S[pid].clear();
-#pragma omp barrier
-        for (int i = 0; i < nprocs; i++){
-            for (pair<int, long long> edge : R[i * nprocs + pid]){
-                int v = edge.first;
-                long long dv = edge.second;
-                if (dv < dist[v]){
-                    int from = min(dist[v] / delta, (long long)nbuckets - 1);
-                    int to = min(dv / delta, (long long)nbuckets - 1);
-#ifdef DEBUG
-                    if (to <= bid)
-                        cout << "[B] inserting into lower buckets" << endl;
-#endif
-                    from = from * nprocs + pid;  // pid == v % nprocs
-                    to = to * nprocs + pid;
-                    if (B[from].find(v) == B[from].end())
-                        B[to].insert(v);
-                    else if (from != to){
-                        B[from].erase(v);
-                        B[to].insert(v);
-                    }
-                    dist[v] = dv;
-                }
-            }
-            R[i * nprocs + pid].clear();
-        }
-#pragma omp barrier
     }
-#pragma omp for reduction(+:checksum)
+#pragma omp for reduction(+:checksum) SCHEDULE
     for (int v = 0; v < nnodes; v++)
 #ifdef CHECK_DISCONNECTED
         if (dist[v] < numeric_limits<long long>::max())
@@ -210,7 +220,6 @@ long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, 
 #else
         checksum += dist[v];
 #endif
-}
     return checksum;
 }
 
@@ -230,10 +239,12 @@ int main(int argc, char * argv[]){
     // disable sync with stdio
     ios_base::sync_with_stdio(false);
 
-    if (argc != 4){
-        printf("Usage: ./%s <graph file> <aux file> <output file>\n", argv[0]);
+    if (argc != 5){
+        printf("Usage: ./%s <graph file> <aux file> <output file> <delta>\n", argv[0]);
         exit(0);
     }
+
+    delta = atoi(argv[4]);
 
     // set number of threads
     int nprocs = omp_get_num_procs();
@@ -281,21 +292,18 @@ int main(int argc, char * argv[]){
 
     // initialize data structures
     if (nnodes < 1e6){
-        delta = 20000;
         max_dist = 1e7;
     }
     else if (nnodes < 1e7){
-        delta = 20000;
         max_dist = 4e7;
     }
     else {
-        delta = 20000;
         max_dist = 4e8;
     }
     int nbuckets = (max_dist / delta) + 1;
-    vector<unordered_set<int> > B(nbuckets * nprocs);
-    vector<map<int, long long> > R(nprocs * nprocs);
-    vector<unordered_set<int> > S(nprocs);
+    vector<unordered_set<int> > B(nbuckets * NTASK);
+    vector<map<int, long long> > R(NTASK * NTASK);
+    vector<unordered_set<int> > S(NTASK);
 
     // read the .ss file line by line and solve the corresponding sssp problem
     ssfile.open(argv[2]);
