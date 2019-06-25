@@ -26,8 +26,8 @@ using namespace std;
 // #define SERIAL
 #define CHECK_DISCONNECTED
 
-#define NTASK 80
-#define SCHEDULE schedule(static, 2)
+#define NTASK 39
+#define SCHEDULE schedule(static, 1)
 
 /*
  *  delta_stepping_openmp - solve the single source shotest path problem using the delta stepping algorithm
@@ -38,7 +38,7 @@ using namespace std;
  *  returns: the sum of all the distances
  */
 
-long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, vector<int> & nlight, int source,
+inline long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, vector<int> & nlight, int source,
                            vector<long long> & dist, long long delta, long long max_dist,
                            int nprocs, vector<unordered_set<int> > & B, vector<map<int, long long> > & R,
                            vector<unordered_set<int> > & S){
@@ -74,6 +74,7 @@ long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, 
     int bid = -1;
     int nbid = -1;
 
+// delta-stepping begins
 #pragma omp parallel
 {
     while (1){
@@ -90,13 +91,14 @@ long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, 
             if (next_bid < nbid)
                 nbid = next_bid;
         }
+#pragma omp single
         bid = nbid;
         if (bid >= nbuckets)
             break;
 
         while (!curr_bucket_empty_flag){
 #pragma omp for SCHEDULE
-            for (int tid = 0; tid < NTASK; tid++){
+            for (int tid = 0; tid < NTASK; tid++){  // find light requests
                 for (auto v: B[bid * NTASK + tid]){
                     long long dv = dist[v];
                     int max_j = bid == nbuckets - 1 ? graph[v].size() : nlight[v];
@@ -128,7 +130,7 @@ long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, 
             //     R[to_merge].clear();
             // }
 #pragma omp for SCHEDULE
-            for (int tid = 0; tid < NTASK; tid++){ 
+            for (int tid = 0; tid < NTASK; tid++){  // relax light edges
                 for (int i = 0; i < NTASK; i++){
                     for (pair<int, long long> edge : R[i * NTASK + tid]){
                         int v = edge.first;
@@ -166,7 +168,7 @@ long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, 
         if (bid == nbuckets - 1)
             break;
 #pragma omp for SCHEDULE
-        for (int tid = 0; tid < NTASK; tid++){
+        for (int tid = 0; tid < NTASK; tid++){  // find heavey requests
             for (int v: S[tid]){
                 long long dv = dist[v];
                 for (int j = nlight[v]; j < graph[v].size(); j++){
@@ -185,7 +187,7 @@ long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, 
             S[tid].clear();
         }
 #pragma omp for SCHEDULE
-        for (int tid = 0; tid < NTASK; tid++){
+        for (int tid = 0; tid < NTASK; tid++){  // relax heavy requests
             for (int i = 0; i < NTASK; i++){
                 for (pair<int, long long> edge : R[i * NTASK + tid]){
                     int v = edge.first;
@@ -251,6 +253,7 @@ int main(int argc, char * argv[]){
 #ifdef SERIAL
     nprocs = 1;
 #endif
+    nprocs = 39;
     omp_set_num_threads(nprocs);
 
 
