@@ -17,10 +17,11 @@
 #include <string>
 #include <stdlib.h>
 #include <stdio.h>
+#include <time.h>
 using namespace std;
 
 
-// #define DEBUG
+#define DEBUG
 // #define CHECK_DISCONNECTED
 
 
@@ -34,17 +35,22 @@ using namespace std;
  */
 
 void delta_stepping(vector<vector<pair<int, long long> > > & graph, vector<int> & nlight, int source, 
-                    vector<long long> & dist, long long delta, long long max_dist){
+                    vector<long long> & dist, long long delta, long long max_dist, vector<vector<int> > & B, vector<int> & S, vector<int> & R){
     fill(dist.begin(), dist.end(), numeric_limits<long long>::max());
+    int nbuckets = max_dist / delta;
 
-    int nbuckets = max_dist / delta + 1;
-    vector<unordered_set<int> > B(nbuckets);
+#ifdef DEBUG
+    cout << "running serial delta-stepping" << endl;
+#endif
 
     dist[source] = 0;
-    B[0].insert(source);
-    for (int bid = 0; bid < nbuckets; bid++){
-        unordered_set<int> S;
-        vector<pair<int, long long> > R;
+    B[0].push_back(source);
+    int bid = 0;
+    while (1){
+        while(bid < nbuckets && B[bid].empty())
+            bid++;
+        if (bid >= nbuckets)
+            break;
         while (!B[bid].empty()){
             for (int v: B[bid]){
                 long long dv = dist[v];
@@ -52,51 +58,50 @@ void delta_stepping(vector<vector<pair<int, long long> > > & graph, vector<int> 
                 for (int j = 0; j < max_j; j++){
                     int tv = graph[v][j].first;
                     long long w = graph[v][j].second;
-                    R.push_back({tv, w + dv});
+                    long long dtv = dv + w;
+                    if (dtv < dist[tv]){
+                        dist[tv] = dtv;
+                        R.push_back(tv);
+                    }
                 }
+                S.push_back(v);
             }
-            S.insert(B[bid].begin(), B[bid].end());
             B[bid].clear();
 
-            for (pair<int, long long> edge : R){
-                int v = edge.first;
-                long long dv = edge.second;
-
-                if (dv < dist[v]){
-                    dist[v] = dv;
-                    int dest = dv / delta;
-                    if (dest >= nbuckets)
-                        dest = nbuckets - 1;
-                    B[dest].insert(v);
-                }
+            for (int v : R){
+                int dest = dist[v] / delta;
+                if (dest >= nbuckets)
+                    dest = nbuckets - 1;
+                if (dest >= bid)
+                    B[dest].push_back(v);
             }
             R.clear();
         }
-        R.clear();
+        if (bid == nbuckets - 1){
+            S.clear();
+            break;
+        }
         for (int v: S){
             long long dv = dist[v];
             for (int j = nlight[v]; j < graph[v].size(); j++){
                 int tv = graph[v][j].first;
                 long long w = graph[v][j].second;
-
-                R.push_back({tv, w + dv});
-            }
-        }
-        for (pair<int, long long> edge : R){
-            int v = edge.first;
-            long long dv = edge.second;
-            if (dv < dist[v]){
-                int from = min(dist[v] / delta, (long long)nbuckets - 1);
-                int to = min(dv / delta, (long long)nbuckets - 1);
-                if (B[from].find(v) == B[from].end())
-                    B[to].insert(v);
-                else if (from != to){
-                    B[from].erase(v);
-                    B[to].insert(v);
+                long long dtv = dv + w;
+                if (dtv < dist[tv]){
+                    dist[tv] = dtv;
+                    R.push_back(tv);
                 }
-                dist[v] = dv;
             }
         }
+        S.clear();
+        for (int v: R){
+            int dest = dist[v] / delta;
+            if (dest >= nbuckets)
+                dest = nbuckets - 1;
+            if (dest > bid)
+                B[dest].push_back(v);
+        }
+        R.clear();
     }
 }
 
@@ -110,8 +115,8 @@ int main(int argc, char * argv[]){
     int src, trg;
     long long weight;
 
-    long long delta = 8000;
-    long long max_dist = 4000000;
+    long long delta = 20000;
+    long long max_dist = 4e8;
 
 
     // disable sync with stdio
@@ -142,6 +147,10 @@ int main(int argc, char * argv[]){
     vector<vector<pair<int, long long> > > graph(nnodes);
     vector<long long> dist(nnodes);
     vector<int> nlight(nnodes, 0);
+    int nbuckets = max_dist / delta;
+    vector<vector<int> > B(nbuckets);
+    vector<int> S;
+    vector<int> R;
 
     graph[src - 1].push_back({trg - 1, weight});
     if (weight < delta)
@@ -167,9 +176,9 @@ int main(int argc, char * argv[]){
             long long checksum = 0;
             istringstream stream(buf);
             stream >> op >> src;
-            delta_stepping(graph, nlight, src - 1, dist, delta, max_dist);
+            clock_t begin = clock();
+            delta_stepping(graph, nlight, src - 1, dist, delta, max_dist, B, S, R);
             for (long long n: dist){
-               
 #ifdef CHECK_DISCONNECTED
                 if (n < numeric_limits<long long>::max())
                     checksum += n;
@@ -179,6 +188,8 @@ int main(int argc, char * argv[]){
                 checksum += n;
 #endif
             }
+            clock_t end = clock();
+            cout << "serial delta-stepping takes " << (double)(end - begin) / CLOCKS_PER_SEC << " seconds" << endl;
             outfile << "d " << checksum << endl;
         }
     }
