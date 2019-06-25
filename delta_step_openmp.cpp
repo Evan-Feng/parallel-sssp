@@ -90,7 +90,6 @@ long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, 
             if (next_bid < nbid)
                 nbid = next_bid;
         }
-#pragma omp single
         bid = nbid;
         if (bid >= nbuckets)
             break;
@@ -220,6 +219,7 @@ long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, 
 #else
         checksum += dist[v];
 #endif
+}
     return checksum;
 }
 
