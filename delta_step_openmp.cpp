@@ -21,7 +21,8 @@
 #include <time.h>
 using namespace std;
 
-#define HELLO { if (pid == 0) cout << "hello" << endl; }
+#define HELLO { if (omp_get_thread_num() == 0) cout << "hello" << endl; }
+#define BID { if (omp_get_thread_num() == 0) cout << "bid = " << bid << endl; }
 #define DEBUG
 // #define SERIAL
 #define CHECK_DISCONNECTED
@@ -37,27 +38,41 @@ using namespace std;
  *  
  *  returns: the sum of all the distances
  */
+int nbuckets;
+int nnodes, nedges;
+long long delta, max_dist;
+int curr_bucket_empty_flag = 0;
+long long checksum = 0;
+int bid = -1;
+int nbid = -1;
+int exit_flag = 0;
+int nprocs;
+vector<vector<pair<int, long long> > > graph;
+vector<unordered_set<int> > B(NTASK);
+vector<map<int, long long> > R(NTASK * NTASK);
+vector<unordered_set<int> > S(NTASK);
+vector<long long> dist;
+vector<long long> nlight;
 
-inline long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, vector<int> & nlight, int source,
-                           vector<long long> & dist, long long delta, long long max_dist,
-                           int nprocs, vector<unordered_set<int> > & B, vector<map<int, long long> > & R,
-                           vector<unordered_set<int> > & S){
-    int nbuckets = max_dist / delta + 1;
-    int nnodes = graph.size();
-    int next_bid[NTASK];
-    int curr_bucket_empty_flag = 0;
-    long long checksum = 0;
-
-    fill(dist.begin(), dist.end(), numeric_limits<long long>::max());
+// inline void delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, vector<int> & nlight, int source,
+//                            vector<long long> & dist, long long delta, long long max_dist,
+//                            int nprocs, vector<unordered_set<int> > & BB, vector<map<int, long long> > & RR,
+//                            vector<unordered_set<int> > & SS){
+void delta_stepping_openmp(int source){
+#pragma omp for
+    for (int v = 0; v < nnodes; v++)
+        dist[v] = numeric_limits<long long>::max();
 
 #ifdef DEBUG
+#pragma omp single
+{
     cout << "running delta-stepping with [delta = " << delta << "] [max_dist = "
          << max_dist << "] [num_threads = " << nprocs << "] [src = " << source << "]" << endl;
+}
 #endif
 
 #ifdef DEBUG
-    int exit_flag = 0;
-#pragma omp parallel for
+#pragma omp for SCHEDULE
     for (int tid = 0; tid < NTASK; tid++)
         for (int bi = 0; bi < nbuckets; bi++)
             if (!B[bi * NTASK + tid].empty()){
@@ -69,14 +84,16 @@ inline long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & 
     }
 #endif
 
+#pragma omp single
+{
     dist[source] = 0;
     B[source % NTASK].insert(source);
-    int bid = -1;
-    int nbid = -1;
+    bid = -1;
+    nbid = -1;
+    checksum = 0;
+}
 
-// delta-stepping begins
-#pragma omp parallel
-{
+    // delta-stepping begins
     while (1){
 #pragma omp single
 {
@@ -99,7 +116,7 @@ inline long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & 
         while (!curr_bucket_empty_flag){
 #pragma omp for SCHEDULE
             for (int tid = 0; tid < NTASK; tid++){  // find light requests
-                for (auto v: B[bid * NTASK + tid]){
+                for (auto v: B[bid * NTASK + tid]){                    
                     long long dv = dist[v];
                     int max_j = bid == nbuckets - 1 ? graph[v].size() : nlight[v];
                     for (int j = 0; j < max_j; j++){
@@ -109,7 +126,7 @@ inline long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & 
 #ifdef DEBUG
                         if (w < 0)
                             cout << "negative weight encountered" << endl;
-#endif
+#endif  
 
                         int r_dest = (tid * NTASK) + (tv % NTASK);
                         auto it = R[r_dest].find(tv);
@@ -213,7 +230,7 @@ inline long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & 
             }
         }
     }
-#pragma omp for reduction(+:checksum) SCHEDULE
+#pragma omp for reduction(+:checksum)
     for (int v = 0; v < nnodes; v++)
 #ifdef CHECK_DISCONNECTED
         if (dist[v] < numeric_limits<long long>::max())
@@ -221,22 +238,20 @@ inline long long delta_stepping_openmp(vector<vector<pair<int, long long> > > & 
 #else
         checksum += dist[v];
 #endif
-}
-    return checksum;
+    return;
 }
 
 
 int main(int argc, char * argv[]){
     string buf;
     size_t len = 0;
-    int nnodes = 0, nedges = 0;
     ifstream grfile, ssfile;
     ofstream outfile;
     int src, trg;
     long long weight;
-
-    long long delta = 20000;
-    long long max_dist = 400000000;
+    int eof_flag;
+    // long long delta = 20000;
+    // long long max_dist = 400000000;
 
     // disable sync with stdio
     ios_base::sync_with_stdio(false);
@@ -249,11 +264,12 @@ int main(int argc, char * argv[]){
     delta = atoi(argv[4]);
 
     // set number of threads
-    int nprocs = omp_get_num_procs();
+    nprocs = omp_get_num_procs();
 #ifdef SERIAL
     nprocs = 1;
-#endif
+#else
     nprocs = 39;
+#endif
     omp_set_num_threads(nprocs);
 
 
@@ -274,9 +290,9 @@ int main(int argc, char * argv[]){
         }
     }
 
-    vector<vector<pair<int, long long> > > graph(nnodes);
-    vector<long long> dist(nnodes);
-    vector<int> nlight(nnodes, 0);
+    graph.resize(nnodes, vector<pair<int, long long> >(0));
+    dist.resize(nnodes, 0);
+    nlight.resize(nnodes, 0);
 
     graph[src - 1].push_back({trg - 1, weight});
     if (weight < delta)
@@ -303,29 +319,43 @@ int main(int argc, char * argv[]){
     else {
         max_dist = 4e8;
     }
-    int nbuckets = (max_dist / delta) + 1;
-    vector<unordered_set<int> > B(nbuckets * NTASK);
-    vector<map<int, long long> > R(NTASK * NTASK);
-    vector<unordered_set<int> > S(NTASK);
+    nbuckets = (max_dist / delta) + 1;
+    B.resize(nbuckets * NTASK, unordered_set<int>(0));
 
+#pragma omp parallel
+{
     // read the .ss file line by line and solve the corresponding sssp problem
+#pragma omp master
+{
     ssfile.open(argv[2]);
     outfile.open(argv[3], fstream::app);
-    while (getline(ssfile, buf)){
+}
+    while (1){
         string op;
+#pragma omp master
+        eof_flag = !getline(ssfile, buf);
+#pragma omp barrier
+        if (eof_flag)
+            break;
         if (buf[0] == 's'){
-            long long checksum = 0;
             istringstream stream(buf);
             stream >> op >> src;
             clock_t begin = clock();
-            checksum = delta_stepping_openmp(graph, nlight, src - 1, dist, delta, max_dist, nprocs, B, R, S);
+            delta_stepping_openmp(src - 1);
             clock_t end = clock();
+#pragma omp master
+{
             cout << "delta-stepping takes " << (double)(end - begin) / (CLOCKS_PER_SEC * nprocs) << " seconds" << endl;
             outfile << "d " << checksum << endl;
+}
         }
     }
+#pragma omp master
+{
     ssfile.close();
     outfile.close();
+}
+}
 
     return 0;
 }
