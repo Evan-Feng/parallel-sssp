@@ -23,9 +23,9 @@ using namespace std;
 
 #define HELLO { if (omp_get_thread_num() == 0) cout << "hello" << endl; }
 #define BID { if (omp_get_thread_num() == 0) cout << "bid = " << bid << endl; }
-#define DEBUG
+// #define DEBUG
 // #define SERIAL
-#define CHECK_DISCONNECTED
+// #define CHECK_DISCONNECTED
 
 #define NTASK 39
 #define SCHEDULE schedule(static, 1)
@@ -90,7 +90,7 @@ int main(int argc, char * argv[]){
 #ifdef SERIAL
     nprocs = 1;
 #else
-    nprocs = 39;
+    nprocs = NTASK;
 #endif
     omp_set_num_threads(nprocs);
 
@@ -170,7 +170,7 @@ int main(int argc, char * argv[]){
 
 /*------------------------------------------------------------------------*/
     int source = src - 1;
-#pragma omp for
+#pragma omp for SCHEDULE
     for (int v = 0; v < nnodes; v++)
         dist[v] = numeric_limits<long long>::max();
 
@@ -227,7 +227,6 @@ int main(int argc, char * argv[]){
             if (next_bid < nbid)
                 nbid = next_bid;
         }
-#pragma omp single
         bid = nbid;
         if (bid >= nbuckets)
             break;
@@ -237,6 +236,8 @@ int main(int argc, char * argv[]){
             for (int tid = 0; tid < NTASK; tid++){  // find light requests
                 for (auto v: B[bid * NTASK + tid]){                    
                     long long dv = dist[v];
+                    if (dv / delta != bid)
+                        continue;
                     int max_j = bid == nbuckets - 1 ? graph[v].size() : nlight[v];
                     for (int j = 0; j < max_j; j++){
                         int tv = graph[v][j].first;
@@ -247,7 +248,7 @@ int main(int argc, char * argv[]){
                             cout << "negative weight encountered" << endl;
 #endif  
 
-                        int r_dest = (tid * NTASK) + (tv % NTASK);
+                        int r_dest = (tv % NTASK) * NTASK + tid;
                         R[r_dest].push_back({tv, dtv});
                         // auto it = R[r_dest].find(tv);
                         // if (it == R[r_dest].end())
@@ -269,7 +270,7 @@ int main(int argc, char * argv[]){
 #pragma omp for SCHEDULE
             for (int tid = 0; tid < NTASK; tid++){  // relax light edges
                 for (int i = 0; i < NTASK; i++){
-                    for (pair<int, long long> edge : R[i * NTASK + tid]){
+                    for (pair<int, long long> edge : R[tid * NTASK + i]){
                         int v = edge.first;
                         long long dv = edge.second;
                         if (dv < dist[v]){
@@ -292,7 +293,7 @@ int main(int argc, char * argv[]){
                             dist[v] = dv;
                         }
                     }
-                    R[i * NTASK + tid].clear();
+                    R[tid * NTASK + i].clear();
                 }
             }
 
@@ -315,7 +316,7 @@ int main(int argc, char * argv[]){
                     long long w = graph[v][j].second;
                     long long dtv = w + dv;
 
-                    int r_dest = (tid * NTASK) + (tv % NTASK);
+                    int r_dest = (tv % NTASK) * NTASK + tid;
                     R[r_dest].push_back({tv, dtv});
                     // auto it = R[r_dest].find(tv);
                     // if (it == R[r_dest].end())
@@ -329,7 +330,7 @@ int main(int argc, char * argv[]){
 #pragma omp for SCHEDULE
         for (int tid = 0; tid < NTASK; tid++){  // relax heavy requests
             for (int i = 0; i < NTASK; i++){
-                for (pair<int, long long> edge : R[i * NTASK + tid]){
+                for (pair<int, long long> edge : R[tid * NTASK + i]){
                     int v = edge.first;
                     long long dv = edge.second;
                     if (dv < dist[v]){
@@ -352,11 +353,11 @@ int main(int argc, char * argv[]){
                         dist[v] = dv;
                     }
                 }
-                R[i * NTASK + tid].clear();
+                R[tid * NTASK + i].clear();
             }
         }
     }
-#pragma omp for reduction(+:checksum)
+#pragma omp for reduction(+:checksum) SCHEDULE
     for (int v = 0; v < nnodes; v++)
 #ifdef CHECK_DISCONNECTED
         if (dist[v] < numeric_limits<long long>::max())
