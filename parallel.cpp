@@ -1,14 +1,15 @@
-/*********************************************************************
- *  Name: parallel.cpp                                               *
- *  Description: solve the single-source shortest path problem       *
- *               using the parallel delta stepping algorithm         *
- *  Usage: ./serial <graph file> <aux file> <output file>            *
- *  Author: fengyanlin@pku.edu.cn                                    *
- *********************************************************************
+/**********************************************************************
+ *  Name: delta_stepping_openmp.cpp                                   *
+ *  Description: Delta-Stepping implementation in OpenMP              *
+ *  Usage: ./delta_step_openmp <graph file> <aux file> <output file>  *
+ *  Author: fengyanlin@pku.edu.cn                                     *
+ **********************************************************************
  */
+#include <omp.h>
 #include <unordered_set>
 #include <vector>
 #include <queue>
+#include <map>
 #include <limits>
 #include <iostream>
 #include <algorithm>
@@ -17,310 +18,304 @@
 #include <string>
 #include <stdlib.h>
 #include <stdio.h>
-#include <mpi.h>
+#include <time.h>
 using namespace std;
 
-
+#define HELLO { if (omp_get_thread_num() == 0) cout << "hello" << endl; }
+#define BID { if (omp_get_thread_num() == 0) cout << "bid = " << bid << endl; }
 #define DEBUG
-#define CHECK_DISCONNECTED
+// #define CHECK_DISCONNECTED
 
-
-struct Edge{
-    int trg;
-    long long weight;
-    Edge(int trg_, long long weight_): trg(trg_), weight(weight_){}
-};
-
+#define NPROC 39
+#define SCHEDULE schedule(static, 1000)
 
 /*
- *  parallel_delta_stepping - solve the single source shotest path problem using the 
- *                            delta stepping algorithm
+ *  delta_stepping_openmp - solve the single source shotest path problem using the delta stepping algorithm
  *
  *  graph: the graph represented by a list of vertices
  *  source: ID of the source point
  *  
- *  returns: the distances between each vectex and the source point 
+ *  returns: the sum of all the distances
  */
+int nnodes, nedges;
+long long delta, max_dist;
+int curr_bucket_empty_flag = 0;
+int local_bucket_empty[NPROC];
+long long checksum = 0;
+int bid = -1;
+int exit_flag = 0;
+vector<vector<pair<int, long long> > > graph;
+int * B;
+vector<vector<int> > R(NPROC);
+vector<vector<int> > S(NPROC);
+long long * dist;
+vector<long long> nlight;
+long long ll_inf = numeric_limits<long long>::max();
+int int_inf = numeric_limits<int>::max();
 
-void parallel_delta_stepping(int rank, int np, Edge * local_edges, int local_nnodes, int base_id, long long * dist,
-                             int * local_offsets_light, int * local_offsets_heavy, int * local_nedges_each_vertex,
-                             int source, long long * local_dist, long long delta, long long max_dist){
-#ifdef DEBUG
-    cout << "parallel_delta_stepping called by process " << rank << " with source " << source << endl;
+// inline void delta_stepping_openmp(vector<vector<pair<int, long long> > > & graph, vector<int> & nlight, int source,
+//                            vector<long long> & dist, long long delta, long long max_dist,
+//                            int nprocs, vector<unordered_set<int> > & BB, vector<map<int, long long> > & RR,
+//                            vector<unordered_set<int> > & SS){
+void delta_stepping_openmp(int source){
+
     return;
-#endif
-#ifndef DEBUG
-    fill(dist, dist + local_nnodes, numeric_limits<long long>::max());
-
-    int nbuckets = max_dist / delta + 1;
-    vector<unordered_set<int> > B(nbuckets);
-
-    dist[source] = 0;
-    B[0].insert(source);
-    for (int bid = 0; bid < nbuckets; bid++){
-        unordered_set<int> S;
-        vector<pair<int, long long> > R;
-        while (!B[bid].empty()){
-            for (int v: B[bid]){
-                long long dv = dist[v];
-                int max_j = bid == nbuckets - 1 ? graph[v].size() : nlight[v];
-                for (int j = 0; j < max_j; j++){
-                    int tv = graph[v][j].first;
-                    long long w = graph[v][j].second;
-                    R.push_back({tv, w + dv});
-                }
-            }
-            S.insert(B[bid].begin(), B[bid].end());
-            B[bid].clear();
-
-            for (pair<int, long long> edge : R){
-                int v = edge.first;
-                long long dv = edge.second;
-
-                if (dv < dist[v]){
-                    dist[v] = dv;
-                    int dest = dv / delta;
-                    if (dest >= nbuckets)
-                        dest = nbuckets - 1;
-                    B[dest].insert(v);
-                }
-            }
-            R.clear();
-        }
-        R.clear();
-        for (int v: S){
-            long long dv = dist[v];
-            for (int j = nlight[v]; j < graph[v].size(); j++){
-                int tv = graph[v][j].first;
-                long long w = graph[v][j].second;
-
-                R.push_back({tv, w + dv});
-            }
-        }
-        for (pair<int, long long> edge : R){
-            int v = edge.first;
-            long long dv = edge.second;
-            if (dv < dist[v]){
-                int from = min(dist[v] / delta, (long long)nbuckets - 1);
-                int to = min(dv / delta, (long long)nbuckets - 1);
-                if (B[from].find(v) != B[from].end())
-                    B[from].erase(v);
-                B[to].insert(v);
-                dist[v] = dv;
-            }
-        }
-    }
-#endif
 }
 
 
 int main(int argc, char * argv[]){
     string buf;
-    int nnodes = 0, nedges = 0, local_nnodes = 0;
+    size_t len = 0;
     ifstream grfile, ssfile;
     ofstream outfile;
     int src, trg;
     long long weight;
-    long long delta = 1000;
-    long long max_dist = 1000000;
-    int np, rank, base_id;
+    int eof_flag;
+    // long long delta = 20000;
+    // long long max_dist = 400000000;
 
     // disable sync with stdio
     ios_base::sync_with_stdio(false);
 
-    if (argc != 4){
-        printf("Usage: ./%s <graph file> <aux file> <output file>\n", argv[0]);
+    if (argc != 5){
+        printf("Usage: ./%s <graph file> <aux file> <output file> <delta>\n", argv[0]);
         exit(0);
     }
 
-    MPI_Init(&argc, &argv); 
-    MPI_Comm_size(MPI_COMM_WORLD, &np);  // get number of processes
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);  // get rank
+    delta = atoi(argv[4]);
+
+    // set number of threads
+    omp_set_num_threads(NPROC);
 
 
-    if (rank == 0){
-        // proc 0 read graph file
-        grfile.open(argv[1]);
-        while (getline(grfile, buf)){
-            string op, tmp;
-            if (buf[0] == 'c')
-                continue;
-            else if (buf[0] == 'p'){
-                istringstream stream(buf);
-                stream >> op >> tmp >> nnodes >> nedges;
-            }
-            else if (buf[0] == 'a'){
-                istringstream stream(buf);
-                stream >> op >> src >> trg >> weight;
-                break;
-            }
+    // read graph file
+    grfile.open(argv[1]);
+    while (getline(grfile, buf)){
+        string op, tmp;
+        if (buf[0] == 'c')
+            continue;
+        else if (buf[0] == 'p'){
+            istringstream stream(buf);
+            stream >> op >> tmp >> nnodes >> nedges;
         }
-
-        vector<vector<pair<int, long long> > > graph(nnodes);
-        vector<int> nlight(nnodes, 0);
-
-        graph[src - 1].push_back({trg - 1, weight});
-        if (weight < delta)
-            nlight[src - 1] += 1;
-        for (int i = 0; i < nedges - 1; i++){
-            string op;
-            grfile >> op >> src >> trg >> weight;
-            if (weight < delta){
-                graph[src - 1].insert(graph[src - 1].begin() + nlight[src - 1], {trg - 1, weight});
-                nlight[src - 1]++;
-            }
-            else
-                graph[src - 1].push_back({trg - 1, weight});    
+        else if (buf[0] == 'a'){
+            istringstream stream(buf);
+            stream >> op >> src >> trg >> weight;
+            break;
         }
-        grfile.close();
+    }
 
-        // broadcast nnodes and nedges
-        MPI_Bcast(&nnodes, 1, MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Bcast(&nedges, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    graph.resize(nnodes, vector<pair<int, long long> >(0));
+    nlight.resize(nnodes, 0);
+    dist = (long long *)malloc(nnodes * sizeof(long long));
 
-        // compute local number of vertices
-        local_nnodes = nnodes / np;
-        if (rank == np - 1){
-            local_nnodes += nnodes % np;
+    graph[src - 1].push_back({trg - 1, weight});
+    if (weight < delta)
+        nlight[src - 1] += 1;
+    for (int i = 0; i < nedges - 1; i++){
+        string op;
+        grfile >> op >> src >> trg >> weight;
+        if (weight < delta){
+            graph[src - 1].insert(graph[src - 1].begin() + nlight[src - 1], {trg - 1, weight});
+            nlight[src - 1]++;
         }
-        base_id = (nnodes / np) * rank;
+        else
+            graph[src - 1].push_back({trg - 1, weight});    
+    }
+    grfile.close();
 
-        // convert graph to linear representation
-        Edge * edges = (Edge *)malloc(nedges * sizeof(Edge));
-        int * offsets_light = (int *)malloc(nnodes * sizeof(int));
-        int * offsets_heavy = (int *)malloc(nnodes * sizeof(int));
-        int * nedges_each_vertex = (int *)malloc(nnodes * sizeof(int));
-
-        int local_nedges = offsets_light[1];
-        Edge * local_edges = (Edge *)malloc(local_nedges * sizeof(Edge));
-        int * local_offsets_light = (int *)malloc(local_nnodes * sizeof(int));
-        int * local_offsets_heavy = (int *)malloc(local_nnodes * sizeof(int));
-        int * local_nedges_each_vertex = (int *)malloc(local_nnodes * sizeof(int));
-        long long * dist = (long long *)malloc(local_nnodes * sizeof(long long));
-
-        Edge * ptr = edges;
-        for (int v = 0; v < nnodes; v++){
-            offsets_light[v] = ptr - edges;
-            offsets_heavy[v] = ptr - edges + nlight[v];
-            nedges_each_vertex[v] = graph[v].size();
-            for (int j = 0; j < graph[v].size(); j++){
-                ptr->trg = graph[v][j].first;
-                ptr->weight = graph[v][j].second;
-                ptr++;
-            }
-        }
-
-        int * sendcounts_v = (int *)malloc(np * sizeof(int));
-        int * displs_v = (int *)malloc(np * sizeof(int));
-        int * sendcounts_e = (int *)malloc(np * sizeof(int));
-        int * displs_e = (int *)malloc(np * sizeof(int));
-        for (int pid = 0; pid < np; pid++){
-            sendcounts_v[pid] = (pid == np - 1) ? ((nnodes / np) + (nnodes % np)) : (nnodes / np);
-            displs_v[pid] = (nnodes / np) * pid;
-        }
-        for (int pid = 0; pid < np; pid++)
-            displs_e[pid] = offsets_light[(nnodes / np) * pid] * sizeof(Edge);
-        for (int pid = 0; pid < np; pid++)
-            if (pid == np - 1)
-                sendcounts_e[pid] = nedges * sizeof(Edge) - displs_e[pid];
-            else
-                sendcounts_e[pid] = (displs_e[pid + 1] - displs_e[pid]);
-
-        MPI_Scatterv(nedges_each_vertex, sendcounts_v, displs_v, MPI_INT, local_nedges_each_vertex, local_nnodes, MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Scatterv(offsets_light, sendcounts_v, displs_v, MPI_INT, local_offsets_light, local_nnodes, MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Scatterv(offsets_heavy, sendcounts_v, displs_v, MPI_INT, local_offsets_heavy, local_nnodes, MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Scatterv((char *)edges, sendcounts_e, displs_e, MPI_CHAR, (char *)local_edges, local_nedges * sizeof(Edge), MPI_CHAR, 0, MPI_COMM_WORLD);
-
-        // proc 0 read the .ss file line by line and solve the corresponding sssp problem
-        ssfile.open(argv[2]);
-        outfile.open(argv[3], fstream::app);
-        while (getline(ssfile, buf)){
-            string op;
-            if (buf[0] == 's'){
-                long long checksum = 0;
-                istringstream stream(buf);
-                stream >> op >> src;
-                MPI_Bcast(&src, 1, MPI_INT, 0, MPI_COMM_WORLD);
-                parallel_delta_stepping(rank, np, local_edges, local_nnodes, base_id, dist, local_offsets_light,
-                                        local_offsets_heavy, local_nedges_each_vertex, src - 1, dist, delta, max_dist);
-                for (long long n: dist){
-#ifdef CHECK_DISCONNECTED
-                    if (n < numeric_limits<long long>::max())
-                        checksum += n;
-                    else
-                        cout << "inf dist encountered" << endl;
-#else
-                    checksum += n;
-#endif
-                }
-                outfile << "d " << checksum << endl;
-                break;
-            }
-        }
-        src = -1;
-        MPI_Bcast(&src, 1, MPI_INT, 0, MPI_COMM_WORLD);
-        ssfile.close();
-        outfile.close();
-
-        free(offsets_light);
-        free(offsets_heavy);
-        free(nedges_each_vertex);
-        free(edges);
-        free(sendcounts_v);
-        free(sendcounts_e);
-        free(displs_v);
-        free(displs_e);
-        free(local_offsets_light);
-        free(local_offsets_heavy);
-        free(local_nedges_each_vertex);
-        free(local_edges);
-        free(dist);
+    // initialize data structures
+    if (nnodes < 1e6){
+        max_dist = 1e7;
+    }
+    else if (nnodes < 1e7){
+        max_dist = 4e7;
     }
     else {
-        // broadcast nnodes and nedges
-        MPI_Bcast(&nnodes, 1, MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Bcast(&nedges, 1, MPI_INT, 0, MPI_COMM_WORLD);
+        max_dist = 4e8;
+    }
+    B = (int *)malloc(nnodes * sizeof(int));
 
-        // compute local number of vertices
-        local_nnodes = nnodes / np;
-        if (rank == np - 1){
-            local_nnodes += nnodes % np;
-        }
-        base_id = (nnodes / np) * rank;
+#pragma omp parallel
+{
+    int pid = omp_get_thread_num();
 
-        int * local_offsets_light = (int *)malloc(local_nnodes * sizeof(int));
-        int * local_offsets_heavy = (int *)malloc(local_nnodes * sizeof(int));
-        int * local_nedges_each_vertex = (int *)malloc(local_nnodes * sizeof(int));
-        MPI_Scatterv(NULL, NULL, NULL, MPI_INT, local_nedges_each_vertex, local_nnodes, MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Scatterv(NULL, NULL, NULL, MPI_INT, local_offsets_light, local_nnodes, MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Scatterv(NULL, NULL, NULL, MPI_INT, local_offsets_heavy, local_nnodes, MPI_INT, 0, MPI_COMM_WORLD);
-        int local_nedges = 0 ;
-        for (int v = 0; v < local_nnodes; v++)
-            local_nedges += local_nedges_each_vertex[v];
-        Edge * local_edges = (Edge *)malloc(local_nedges * sizeof(Edge));
-        long long * dist = (long long *)malloc(local_nnodes * sizeof(long long));
+    // read the .ss file line by line and solve the corresponding sssp problem
+#pragma omp master
+{
+    ssfile.open(argv[2]);
+    outfile.open(argv[3], fstream::app);
+}
+    while (1){
+        string op;
+#pragma omp barrier
+#pragma omp master
+{
+        eof_flag = !getline(ssfile, buf);
+}
+#pragma omp barrier
+        if (eof_flag)
+            break;
+        if (buf[0] == 's'){
+            istringstream stream(buf);
+            int src;
+            stream >> op >> src;
+            clock_t begin = clock();
 
-        MPI_Scatterv(NULL, NULL, NULL, MPI_CHAR, (char *)local_edges, local_nedges * sizeof(Edge), MPI_CHAR, 0, MPI_COMM_WORLD);
-
-        cout << rank << ' ' << local_nnodes << endl;
-        for (int v = 0; v < local_nedges_each_vertex[0]; v++)
-            cout << local_edges[v].trg << ' ' << local_edges[v].weight << ' ' << endl;
-
-        while (1){
-            MPI_Bcast(&src, 1, MPI_INT, 0, MPI_COMM_WORLD);
-            if (src == -1)
-                break;
-            parallel_delta_stepping(rank, np, local_edges, local_nnodes, base_id, dist, local_offsets_light,
-                                    local_offsets_heavy, local_nedges_each_vertex, src - 1, dist, delta, max_dist);
-        }
-        free(local_offsets_light);
-        free(local_offsets_heavy);
-        free(local_nedges_each_vertex);
-        free(local_edges);
-        free(dist);
+/*------------------------------------------------------------------------*/
+    int source = src - 1;
+#pragma omp for SCHEDULE
+    for (int v = 0; v < nnodes; v++){
+        dist[v] = ll_inf;
+        B[v] = int_inf;
     }
 
-    MPI_Finalize();
+#ifdef DEBUG
+#pragma omp single
+{
+    cout << "running parallel with [delta = " << delta << "] [max_dist = "
+         << max_dist << "] [num_threads = " << NPROC << "] [src = " << source << "]" << endl;
+}
+#endif
+
+#ifdef DEBUG
+#pragma omp for SCHEDULE
+    for (int pid = 0; pid < NPROC; pid++){
+        if (!S[pid].empty()){
+            exit_flag = 1;
+        }
+        if (!R[pid].empty()){
+            exit_flag = 1;
+        }
+    }
+    if (exit_flag){
+        cout << "bucket not empty" << endl;
+        exit(0);
+    }
+#endif
+
+#pragma omp single
+{
+    dist[source] = 0;
+    B[source] = 0;
+    checksum = 0;
+}
+
+    // delta-stepping begins
+    while (1){
+#pragma omp single
+{
+        bid = int_inf;
+        curr_bucket_empty_flag = 0;
+}
+#pragma omp for reduction(min:bid) SCHEDULE
+        for (int v = 0; v < nnodes; v++)
+            if (B[v] < bid)
+                bid = B[v];
+
+        if (bid == int_inf)
+            break;
+
+        // BID
+
+        while (!curr_bucket_empty_flag){
+#pragma omp for SCHEDULE
+            for (int v = 0; v < nnodes; v++)
+                if (B[v] == bid){
+                    long long dv = dist[v];
+                    for (int j = 0; j < nlight[v]; j++){
+                        int tv = graph[v][j].first;
+                        long long w = graph[v][j].second;
+                        long long dtv = dv + w;
+                        bool updated = false;
+                        while (!updated){
+                            long long old_dtv = dist[tv];
+                            if (dtv < old_dtv)
+                                updated = __sync_bool_compare_and_swap(&dist[tv], old_dtv, dtv);
+                            else
+                                break;
+                        }
+                        if (updated)
+                            R[pid].push_back(tv);
+                    }
+                    B[v] = int_inf;
+                    S[pid].push_back(v);
+                }
+            local_bucket_empty[pid] = 1;
+            for (int v: R[pid]){
+                long long dv = dist[v];
+                int to_bid = dv / delta;
+                if (to_bid >= bid)
+                    B[v] = to_bid;
+                if (to_bid == bid)
+                    local_bucket_empty[pid] = 0;
+            }
+            R[pid].clear();
+#pragma omp single
+            curr_bucket_empty_flag = 1;
+#pragma omp for reduction(min:curr_bucket_empty_flag)
+            for (int pi = 0; pi < NPROC; pi++)
+                if (local_bucket_empty[pi] < curr_bucket_empty_flag)
+                    curr_bucket_empty_flag = local_bucket_empty[pi];
+        }
+
+        // handle heavy edges
+        for (int v: S[pid]){
+            long long dv = dist[v];
+            for (int j = nlight[v]; j < graph[v].size(); j++){
+                int tv = graph[v][j].first;
+                long long w = graph[v][j].second;
+                long long dtv = w + dv;
+                bool updated = false;
+                while (!updated){
+                    long long old_dtv = dist[tv];
+                    if (dtv < old_dtv)
+                        updated = __sync_bool_compare_and_swap(&dist[tv], old_dtv, dtv);
+                    else
+                        break;
+                }
+                if (updated)
+                    R[pid].push_back(tv);
+            }
+        }
+        S[pid].clear();
+#pragma omp barrier
+        for (int v: R[pid]){
+            long long dv = dist[v];
+            int to_bid = dv / delta;
+            if (to_bid > bid)
+                B[v] = to_bid;
+        }
+        R[pid].clear();
+    }
+#pragma omp for reduction(+:checksum) SCHEDULE
+    for (int v = 0; v < nnodes; v++)
+#ifdef CHECK_DISCONNECTED
+        if (dist[v] < ll_inf)
+            checksum += dist[v];
+#else
+        checksum += dist[v];
+#endif
+
+
+/*------------------------------------------------------------------------*/
+
+            clock_t end = clock();
+#pragma omp master
+{
+            cout << "delta-stepping takes " << (double)(end - begin) / (CLOCKS_PER_SEC * NPROC) << " seconds" << endl;
+            outfile << "d " << checksum << endl;
+}
+        }
+    }
+#pragma omp master
+{
+    ssfile.close();
+    outfile.close();
+}
+}
+    free(dist);
+    free(B);
 
     return 0;
 }
