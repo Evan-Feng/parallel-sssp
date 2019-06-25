@@ -24,7 +24,7 @@ using namespace std;
 #define HELLO { if (omp_get_thread_num() == 0) cout << "hello" << endl; }
 #define BID { if (omp_get_thread_num() == 0) cout << "bid = " << bid << endl; }
 #define DEBUG
-// #define CHECK_DISCONNECTED
+#define CHECK_DISCONNECTED
 
 #define NPROC 39
 #define SCHEDULE schedule(static, 1000)
@@ -46,6 +46,7 @@ int bid = -1;
 int exit_flag = 0;
 vector<vector<pair<int, long long> > > graph;
 int * B;
+vector<vector<int> > local_B(NPROC);
 vector<vector<int> > R(NPROC);
 vector<vector<int> > S(NPROC);
 long long * dist;
@@ -179,12 +180,15 @@ int main(int argc, char * argv[]){
 #endif
 
 #ifdef DEBUG
-#pragma omp for SCHEDULE
-    for (int pid = 0; pid < NPROC; pid++){
-        if (!S[pid].empty()){
+#pragma omp for
+    for (int pi = 0; pi < NPROC; pi++){
+        if (!S[pi].empty()){
             exit_flag = 1;
         }
-        if (!R[pid].empty()){
+        if (!R[pi].empty()){
+            exit_flag = 1;
+        }
+        if (!local_B[pi].empty()){
             exit_flag = 1;
         }
     }
@@ -216,49 +220,56 @@ int main(int argc, char * argv[]){
         if (bid == int_inf)
             break;
 
-        // BID
-
-        while (!curr_bucket_empty_flag){
 #pragma omp for SCHEDULE
-            for (int v = 0; v < nnodes; v++)
-                if (B[v] == bid){
-                    long long dv = dist[v];
-                    for (int j = 0; j < nlight[v]; j++){
-                        int tv = graph[v][j].first;
-                        long long w = graph[v][j].second;
-                        long long dtv = dv + w;
-                        bool updated = false;
-                        while (!updated){
-                            long long old_dtv = dist[tv];
-                            if (dtv < old_dtv)
-                                updated = __sync_bool_compare_and_swap(&dist[tv], old_dtv, dtv);
-                            else
-                                break;
-                        }
-                        if (updated)
-                            R[pid].push_back(tv);
+        for (int v = 0; v < nnodes; v++)
+            if (B[v] == bid)
+                local_B[pid].push_back(v);
+
+        while (!local_B[pid].empty()){
+            for (int v: local_B[pid]){
+                long long dv = dist[v];
+                for (int j = 0; j < nlight[v]; j++){
+                    int tv = graph[v][j].first;
+                    long long w = graph[v][j].second;
+                    long long dtv = dv + w;
+                    bool updated = false;
+                    if (dtv < dist[tv])
+                        R[pid].push_back(tv);
+                    while (!updated){
+                        volatile long long old_dtv = dist[tv];
+                        if (dtv < old_dtv)
+                            updated = __sync_bool_compare_and_swap(&dist[tv], old_dtv, dtv);
+                        else
+                            break;
                     }
-                    B[v] = int_inf;
-                    S[pid].push_back(v);
+                    // if (updated)
+                    //     R[pid].push_back(tv);
+                    
                 }
-            local_bucket_empty[pid] = 1;
+                B[v] = int_inf;
+                S[pid].push_back(v);
+            }
+            local_B[pid].clear();
+// #pragma omp barrier
             for (int v: R[pid]){
                 long long dv = dist[v];
                 int to_bid = dv / delta;
-                if (to_bid >= bid)
+                if (to_bid > bid)
                     B[v] = to_bid;
-                if (to_bid == bid)
-                    local_bucket_empty[pid] = 0;
+                else if (to_bid == bid)
+                    local_B[pid].push_back(v);
             }
             R[pid].clear();
-#pragma omp single
-            curr_bucket_empty_flag = 1;
-#pragma omp for reduction(min:curr_bucket_empty_flag)
-            for (int pi = 0; pi < NPROC; pi++)
-                if (local_bucket_empty[pi] < curr_bucket_empty_flag)
-                    curr_bucket_empty_flag = local_bucket_empty[pi];
+//             local_bucket_empty[pid] = local_B[pid].empty();
+// #pragma omp single
+//             curr_bucket_empty_flag = 1;
+// #pragma omp for reduction(min:curr_bucket_empty_flag)
+//             for (int pi = 0; pi < NPROC; pi++)
+//                 if (local_bucket_empty[pi] < curr_bucket_empty_flag)
+//                     curr_bucket_empty_flag = local_bucket_empty[pi];
         }
 
+// #pragma omp barrier
         // handle heavy edges
         for (int v: S[pid]){
             long long dv = dist[v];
@@ -267,8 +278,10 @@ int main(int argc, char * argv[]){
                 long long w = graph[v][j].second;
                 long long dtv = w + dv;
                 bool updated = false;
+                // if (dtv < dist[tv])
+                //     R[pid].push_back(tv);
                 while (!updated){
-                    long long old_dtv = dist[tv];
+                    volatile long long old_dtv = dist[tv];
                     if (dtv < old_dtv)
                         updated = __sync_bool_compare_and_swap(&dist[tv], old_dtv, dtv);
                     else
@@ -279,7 +292,7 @@ int main(int argc, char * argv[]){
             }
         }
         S[pid].clear();
-#pragma omp barrier
+// #pragma omp barrier
         for (int v: R[pid]){
             long long dv = dist[v];
             int to_bid = dv / delta;
@@ -287,6 +300,7 @@ int main(int argc, char * argv[]){
                 B[v] = to_bid;
         }
         R[pid].clear();
+#pragma omp barrier
     }
 #pragma omp for reduction(+:checksum) SCHEDULE
     for (int v = 0; v < nnodes; v++)
