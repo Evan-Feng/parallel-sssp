@@ -21,8 +21,15 @@
 using namespace std;
 
 
-// #define DEBUG
-// #define CHECK_DISCONNECTED
+#define DEBUG
+#define CHECK_DISCONNECTED
+
+
+struct Edge{
+    int trg;
+    long long weight;
+    Edge(int trg_, long long weight_): trg(trg_), weight(weight_){}
+};
 
 
 /*
@@ -35,9 +42,15 @@ using namespace std;
  *  returns: the distances between each vectex and the source point 
  */
 
-void parallel_delta_stepping(vector<vector<pair<int, long long> > > & graph, vector<int> & nlight, int source, 
-                             vector<long long> & dist, long long delta, long long max_dist, int rank, int np){
-    fill(dist.begin(), dist.end(), numeric_limits<long long>::max());
+void parallel_delta_stepping(int rank, int np, Edge * local_edges, int local_nnodes, int base_id, long long * dist,
+                             int * local_offsets_light, int * local_offsets_heavy, int * local_nedges_each_vertex,
+                             int source, long long * local_dist, long long delta, long long max_dist){
+#ifdef DEBUG
+    cout << "parallel_delta_stepping called by process " << rank << " with source " << source << endl;
+    return;
+#endif
+#ifndef DEBUG
+    fill(dist, dist + local_nnodes, numeric_limits<long long>::max());
 
     int nbuckets = max_dist / delta + 1;
     vector<unordered_set<int> > B(nbuckets);
@@ -97,13 +110,8 @@ void parallel_delta_stepping(vector<vector<pair<int, long long> > > & graph, vec
             }
         }
     }
+#endif
 }
-
-struct Edge{
-    int trg;
-    long long weight;
-    Edge(int trg_, long long weight_): trg(trg_), weight(weight_){}
-};
 
 
 int main(int argc, char * argv[]){
@@ -129,12 +137,6 @@ int main(int argc, char * argv[]){
     MPI_Comm_size(MPI_COMM_WORLD, &np);  // get number of processes
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);  // get rank
 
-    // compute local number of vertices
-    local_nnodes = nnodes / np;
-    if (rank == np - 1){
-        local_nnodes += nnodes % np;
-    }
-    base_id = (nnodes / np) * rank;
 
     if (rank == 0){
         // proc 0 read graph file
@@ -155,7 +157,6 @@ int main(int argc, char * argv[]){
         }
 
         vector<vector<pair<int, long long> > > graph(nnodes);
-        vector<long long> dist(nnodes);
         vector<int> nlight(nnodes, 0);
 
         graph[src - 1].push_back({trg - 1, weight});
@@ -173,20 +174,62 @@ int main(int argc, char * argv[]){
         }
         grfile.close();
 
+        // broadcast nnodes and nedges
+        MPI_Bcast(&nnodes, 1, MPI_INT, 0, MPI_COMM_WORLD);
+        MPI_Bcast(&nedges, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+        // compute local number of vertices
+        local_nnodes = nnodes / np;
+        if (rank == np - 1){
+            local_nnodes += nnodes % np;
+        }
+        base_id = (nnodes / np) * rank;
+
         // convert graph to linear representation
         Edge * edges = (Edge *)malloc(nedges * sizeof(Edge));
         int * offsets_light = (int *)malloc(nnodes * sizeof(int));
         int * offsets_heavy = (int *)malloc(nnodes * sizeof(int));
+        int * nedges_each_vertex = (int *)malloc(nnodes * sizeof(int));
+
+        int local_nedges = offsets_light[1];
+        Edge * local_edges = (Edge *)malloc(local_nedges * sizeof(Edge));
+        int * local_offsets_light = (int *)malloc(local_nnodes * sizeof(int));
+        int * local_offsets_heavy = (int *)malloc(local_nnodes * sizeof(int));
+        int * local_nedges_each_vertex = (int *)malloc(local_nnodes * sizeof(int));
+        long long * dist = (long long *)malloc(local_nnodes * sizeof(long long));
+
         Edge * ptr = edges;
         for (int v = 0; v < nnodes; v++){
             offsets_light[v] = ptr - edges;
             offsets_heavy[v] = ptr - edges + nlight[v];
+            nedges_each_vertex[v] = graph[v].size();
             for (int j = 0; j < graph[v].size(); j++){
                 ptr->trg = graph[v][j].first;
                 ptr->weight = graph[v][j].second;
                 ptr++;
             }
         }
+
+        int * sendcounts_v = (int *)malloc(np * sizeof(int));
+        int * displs_v = (int *)malloc(np * sizeof(int));
+        int * sendcounts_e = (int *)malloc(np * sizeof(int));
+        int * displs_e = (int *)malloc(np * sizeof(int));
+        for (int pid = 0; pid < np; pid++){
+            sendcounts_v[pid] = (pid == np - 1) ? ((nnodes / np) + (nnodes % np)) : (nnodes / np);
+            displs_v[pid] = (nnodes / np) * pid;
+        }
+        for (int pid = 0; pid < np; pid++)
+            displs_e[pid] = offsets_light[(nnodes / np) * pid] * sizeof(Edge);
+        for (int pid = 0; pid < np; pid++)
+            if (pid == np - 1)
+                sendcounts_e[pid] = nedges * sizeof(Edge) - displs_e[pid];
+            else
+                sendcounts_e[pid] = (displs_e[pid + 1] - displs_e[pid]);
+
+        MPI_Scatterv(nedges_each_vertex, sendcounts_v, displs_v, MPI_INT, local_nedges_each_vertex, local_nnodes, MPI_INT, 0, MPI_COMM_WORLD);
+        MPI_Scatterv(offsets_light, sendcounts_v, displs_v, MPI_INT, local_offsets_light, local_nnodes, MPI_INT, 0, MPI_COMM_WORLD);
+        MPI_Scatterv(offsets_heavy, sendcounts_v, displs_v, MPI_INT, local_offsets_heavy, local_nnodes, MPI_INT, 0, MPI_COMM_WORLD);
+        MPI_Scatterv((char *)edges, sendcounts_e, displs_e, MPI_CHAR, (char *)local_edges, local_nedges * sizeof(Edge), MPI_CHAR, 0, MPI_COMM_WORLD);
 
         // proc 0 read the .ss file line by line and solve the corresponding sssp problem
         ssfile.open(argv[2]);
@@ -197,7 +240,9 @@ int main(int argc, char * argv[]){
                 long long checksum = 0;
                 istringstream stream(buf);
                 stream >> op >> src;
-                parallel_delta_stepping(graph, nlight, src - 1, dist, delta, max_dist, rank, np);
+                MPI_Bcast(&src, 1, MPI_INT, 0, MPI_COMM_WORLD);
+                parallel_delta_stepping(rank, np, local_edges, local_nnodes, base_id, dist, local_offsets_light,
+                                        local_offsets_heavy, local_nedges_each_vertex, src - 1, dist, delta, max_dist);
                 for (long long n: dist){
 #ifdef CHECK_DISCONNECTED
                     if (n < numeric_limits<long long>::max())
@@ -212,11 +257,70 @@ int main(int argc, char * argv[]){
                 break;
             }
         }
+        src = -1;
+        MPI_Bcast(&src, 1, MPI_INT, 0, MPI_COMM_WORLD);
         ssfile.close();
         outfile.close();
+
+        free(offsets_light);
+        free(offsets_heavy);
+        free(nedges_each_vertex);
+        free(edges);
+        free(sendcounts_v);
+        free(sendcounts_e);
+        free(displs_v);
+        free(displs_e);
+        free(local_offsets_light);
+        free(local_offsets_heavy);
+        free(local_nedges_each_vertex);
+        free(local_edges);
+        free(dist);
     }
     else {
+        // broadcast nnodes and nedges
+        MPI_Bcast(&nnodes, 1, MPI_INT, 0, MPI_COMM_WORLD);
+        MPI_Bcast(&nedges, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+        // compute local number of vertices
+        local_nnodes = nnodes / np;
+        if (rank == np - 1){
+            local_nnodes += nnodes % np;
+        }
+        base_id = (nnodes / np) * rank;
+
+        int * local_offsets_light = (int *)malloc(local_nnodes * sizeof(int));
+        int * local_offsets_heavy = (int *)malloc(local_nnodes * sizeof(int));
+        int * local_nedges_each_vertex = (int *)malloc(local_nnodes * sizeof(int));
+        MPI_Scatterv(NULL, NULL, NULL, MPI_INT, local_nedges_each_vertex, local_nnodes, MPI_INT, 0, MPI_COMM_WORLD);
+        MPI_Scatterv(NULL, NULL, NULL, MPI_INT, local_offsets_light, local_nnodes, MPI_INT, 0, MPI_COMM_WORLD);
+        MPI_Scatterv(NULL, NULL, NULL, MPI_INT, local_offsets_heavy, local_nnodes, MPI_INT, 0, MPI_COMM_WORLD);
+        int local_nedges = 0 ;
+        for (int v = 0; v < local_nnodes; v++)
+            local_nedges += local_nedges_each_vertex[v];
+        Edge * local_edges = (Edge *)malloc(local_nedges * sizeof(Edge));
+        long long * dist = (long long *)malloc(local_nnodes * sizeof(long long));
+
+        MPI_Scatterv(NULL, NULL, NULL, MPI_CHAR, (char *)local_edges, local_nedges * sizeof(Edge), MPI_CHAR, 0, MPI_COMM_WORLD);
+
+        cout << rank << ' ' << local_nnodes << endl;
+        for (int v = 0; v < local_nedges_each_vertex[0]; v++)
+            cout << local_edges[v].trg << ' ' << local_edges[v].weight << ' ' << endl;
+
+        while (1){
+            MPI_Bcast(&src, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            if (src == -1)
+                break;
+            parallel_delta_stepping(rank, np, local_edges, local_nnodes, base_id, dist, local_offsets_light,
+                                    local_offsets_heavy, local_nedges_each_vertex, src - 1, dist, delta, max_dist);
+        }
+        free(local_offsets_light);
+        free(local_offsets_heavy);
+        free(local_nedges_each_vertex);
+        free(local_edges);
+        free(dist);
     }
+
+    MPI_Finalize();
 
     return 0;
 }
