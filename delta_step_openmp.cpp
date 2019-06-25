@@ -48,9 +48,9 @@ int nbid = -1;
 int exit_flag = 0;
 int nprocs;
 vector<vector<pair<int, long long> > > graph;
-vector<unordered_set<int> > B(NTASK);
+vector<vector<int> > B(NTASK);
 vector<vector<pair<int, long long> > > R(NTASK * NTASK);
-vector<unordered_set<int> > S(NTASK);
+vector<vector<int> > S(NTASK);
 vector<long long> dist;
 vector<long long> nlight;
 
@@ -141,8 +141,8 @@ int main(int argc, char * argv[]){
     else {
         max_dist = 4e8;
     }
-    nbuckets = (max_dist / delta) + 1;
-    B.resize(nbuckets * NTASK, unordered_set<int>(0));
+    nbuckets = (max_dist / delta);
+    B.resize(nbuckets * NTASK, vector<int>(0));
 
 #pragma omp parallel
 {
@@ -206,7 +206,7 @@ int main(int argc, char * argv[]){
 #pragma omp single
 {
     dist[source] = 0;
-    B[source % NTASK].insert(source);
+    B[source % NTASK].push_back(source);
     bid = -1;
     nbid = -1;
     checksum = 0;
@@ -257,7 +257,7 @@ int main(int argc, char * argv[]){
                     }
                 }
                 if (bid != nbuckets - 1)
-                    S[tid].insert(B[bid * NTASK + tid].begin(), B[bid * NTASK + tid].end());
+                    S[tid].insert(S[tid].end(), B[bid * NTASK + tid].begin(), B[bid * NTASK + tid].end());
                 B[bid * NTASK + tid].clear();
             }
             // merge light requests
@@ -281,12 +281,14 @@ int main(int argc, char * argv[]){
 #endif
                             from = from * NTASK + tid;  // tid == v % NTASK
                             to = to * NTASK + tid;
-                            if (B[from].find(v) == B[from].end())
-                                B[to].insert(v);
-                            else if (from != to){
-                                B[from].erase(v);
-                                B[to].insert(v);
-                            }
+                            // if (B[from].find(v) == B[from].end())
+                            //     B[to].insert(v);
+                            // else if (from != to){
+                            //     B[from].erase(v);
+                            //     B[to].insert(v);
+                            // }
+                            if (to >= bid)
+                                B[to].push_back(v);
                             dist[v] = dv;
                         }
                     }
@@ -337,13 +339,16 @@ int main(int argc, char * argv[]){
                         if (to <= bid)
                             cout << "[B] inserting into lower buckets " << bid << endl;
 #endif
+                        from = from * NTASK + tid;
                         to = to * NTASK + tid;
-                        if (B[from].find(v) == B[from].end())
-                            B[to].insert(v);
-                        else if (from != to){
-                            B[from].erase(v);
-                            B[to].insert(v);
-                        }
+                        // if (B[from].find(v) == B[from].end())
+                        //     B[to].insert(v);
+                        // else if (from != to){
+                        //     B[from].erase(v);
+                        //     B[to].insert(v);
+                        // }
+                        if (to > bid)
+                            B[to].push_back(v);
                         dist[v] = dv;
                     }
                 }
