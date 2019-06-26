@@ -27,7 +27,7 @@ using namespace std;
 #define CHECK_DISCONNECTED
 
 #define NPROC 39
-#define SCHEDULE schedule(static, 1000)
+#define SCHEDULE schedule(static, 1024)
 
 
 int nnodes, nedges;
