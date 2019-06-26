@@ -15,7 +15,14 @@
 #include <string>
 #include <stdlib.h>
 #include <stdio.h>
+#include <time.h>
 using namespace std;
+
+
+#define DEBUG
+
+
+priority_queue<pair<long long, int>, vector<pair<long long, int> >, greater<pair<long long, int> > > q;
 
 
 /*
@@ -30,10 +37,13 @@ using namespace std;
 void dijkstras(vector<vector<pair<int, long long> > > & graph, int source, vector<long long> & dist){
     vector<int> nodes;
 
+#ifdef DEBUG
+    cout << "running serial dijkstras" << endl;
+#endif
+
     fill(dist.begin(), dist.end(), numeric_limits<long long>::max());
     dist[source] = 0;
 
-    priority_queue<pair<long long, int>, vector<pair<long long, int> >, greater<pair<long long, int> > > q;
     q.push({0, source});
     while (!q.empty()){
         int v = q.top().second;
@@ -105,6 +115,7 @@ int main(int argc, char * argv[]){
             long long checksum = 0;
             istringstream stream(buf);
             stream >> op >> src;
+            clock_t begin = clock();
             dijkstras(graph, src - 1, dist);
             for (long long n: dist)
 #ifdef CHECK_DISCONNECTED
@@ -115,6 +126,8 @@ int main(int argc, char * argv[]){
 #else
                 checksum += n;
 #endif
+            clock_t end = clock();
+            cout << "dijkstras takes " << (double)(end - begin) / CLOCKS_PER_SEC << " seconds" << endl;
             outfile << "d " << checksum << endl;
         }
     }
